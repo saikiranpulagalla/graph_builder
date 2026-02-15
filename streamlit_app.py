@@ -50,38 +50,68 @@ def render_mermaid_html(mermaid_code: str) -> None:
     import streamlit.components.v1 as components
     
     # HTML template with Mermaid CDN and rendering
-    html_template = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
-        <script>
-            mermaid.initialize({{ startOnLoad: true }});
-        </script>
-        <style>
-            body {{
-                margin: 0;
-                padding: 20px;
-                background-color: white;
-                overflow: auto;
-            }}
-            .mermaid {{
-                display: flex;
-                justify-content: center;
-                align-items: center;
-            }}
-        </style>
-    </head>
-    <body>
-        <div class="mermaid">
-{mermaid_code}
-        </div>
-    </body>
-    </html>
-    """
+    # Using textarea to avoid HTML escaping issues
+    html_template = """
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script>
+        window.addEventListener('load', function() {{
+            mermaid.initialize({{ 
+                startOnLoad: false,
+                theme: 'default',
+                securityLevel: 'loose',
+                flowchart: {{
+                    useMaxWidth: true,
+                    htmlLabels: true
+                }}
+            }});
+            
+            // Get the mermaid code from the textarea
+            const code = document.getElementById('mermaid-code').value;
+            const container = document.getElementById('mermaid-container');
+            
+            // Render the diagram
+            mermaid.render('mermaid-diagram', code).then(result => {{
+                container.innerHTML = result.svg;
+            }}).catch(error => {{
+                container.innerHTML = '<div style="color: red; padding: 20px;">Error rendering diagram: ' + error.message + '</div>';
+                console.error('Mermaid error:', error);
+            }});
+        }});
+    </script>
+    <style>
+        body {{
+            margin: 0;
+            padding: 20px;
+            background-color: white;
+            overflow: auto;
+        }}
+        #mermaid-container {{
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 400px;
+        }}
+        #mermaid-container svg {{
+            max-width: 100%;
+            height: auto;
+        }}
+    </style>
+</head>
+<body>
+    <textarea id="mermaid-code" style="display: none;">{code}</textarea>
+    <div id="mermaid-container">Loading diagram...</div>
+</body>
+</html>
+""".format(code=mermaid_code.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;'))
     
     # Render with fixed height and scrolling enabled
     components.html(html_template, height=600, scrolling=True)
+
+
 
 
 # ============================================================================
