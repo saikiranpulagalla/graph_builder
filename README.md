@@ -184,7 +184,6 @@ graph TB
 ### Data Flow Pipeline
 
 ```mermaid
-%%{init: {'theme':'base', 'themeVariables': { 'primaryColor':'#e3f2fd','primaryTextColor':'#000','primaryBorderColor':'#1976d2','lineColor':'#1976d2','secondaryColor':'#f3e5f5','tertiaryColor':'#e8f5e9'}}}%%
 sequenceDiagram
     participant User
     participant Main as __main__.py
@@ -220,7 +219,8 @@ sequenceDiagram
     Merm-->>Main: Mermaid string
     Main->>Files: Write graph.mmd
     
-    Files-->>User: ✅ Graph JSON and Mermaid written
+    Files-->>User: Graph JSON and Mermaid written
+
 ```
 
 ## Entity Types
