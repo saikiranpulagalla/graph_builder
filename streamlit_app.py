@@ -49,8 +49,33 @@ def render_mermaid_html(mermaid_code: str) -> None:
     """
     import streamlit.components.v1 as components
     
+    # Simplify the mermaid code for better rendering
+    # Remove subgraphs which cause layout issues in some Mermaid versions
+    simplified_code = []
+    in_subgraph = False
+    
+    for line in mermaid_code.split('\n'):
+        stripped = line.strip()
+        
+        # Skip subgraph declarations
+        if stripped.startswith('subgraph '):
+            in_subgraph = True
+            continue
+        elif stripped == 'end' and in_subgraph:
+            in_subgraph = False
+            continue
+        
+        # Keep node definitions and edges, but remove extra indentation
+        if stripped and not stripped.startswith('%%'):
+            if in_subgraph:
+                # Remove subgraph indentation
+                simplified_code.append(line.replace('        ', '    '))
+            else:
+                simplified_code.append(line)
+    
+    simplified = '\n'.join(simplified_code)
+    
     # HTML template with Mermaid CDN and rendering
-    # Using textarea to avoid HTML escaping issues
     html_template = """
 <!DOCTYPE html>
 <html>
@@ -65,7 +90,8 @@ def render_mermaid_html(mermaid_code: str) -> None:
                 securityLevel: 'loose',
                 flowchart: {{
                     useMaxWidth: true,
-                    htmlLabels: true
+                    htmlLabels: true,
+                    curve: 'basis'
                 }}
             }});
             
@@ -77,7 +103,11 @@ def render_mermaid_html(mermaid_code: str) -> None:
             mermaid.render('mermaid-diagram', code).then(result => {{
                 container.innerHTML = result.svg;
             }}).catch(error => {{
-                container.innerHTML = '<div style="color: red; padding: 20px;">Error rendering diagram: ' + error.message + '</div>';
+                container.innerHTML = '<div style="color: red; padding: 20px; border: 1px solid red; border-radius: 4px; background: #fff5f5;">' +
+                    '<strong>Error rendering diagram:</strong><br/>' + 
+                    error.message + 
+                    '<br/><br/><em>Tip: The code block above can be copied to <a href="https://mermaid.live" target="_blank">Mermaid Live Editor</a> for visualization.</em>' +
+                    '</div>';
                 console.error('Mermaid error:', error);
             }});
         }});
@@ -106,7 +136,7 @@ def render_mermaid_html(mermaid_code: str) -> None:
     <div id="mermaid-container">Loading diagram...</div>
 </body>
 </html>
-""".format(code=mermaid_code.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;'))
+""".format(code=simplified.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;'))
     
     # Render with fixed height and scrolling enabled
     components.html(html_template, height=600, scrolling=True)
