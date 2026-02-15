@@ -464,6 +464,10 @@ Rule-based extraction is intentionally lossy. Graph builder enforces normalizati
 
 **See [IMPROVEMENTS.md](IMPROVEMENTS.md) for recent enhancements.**
 
+**See [NORMALIZATION.md](NORMALIZATION.md) for graph normalization details.**
+
+**See [LLM_NORMALIZATION.md](LLM_NORMALIZATION.md) for LLM-specific normalization fixes.**
+
 ## Troubleshooting
 
 ### Issue: Entity misclassified

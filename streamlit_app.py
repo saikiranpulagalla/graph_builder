@@ -27,13 +27,61 @@ if parent_dir not in sys.path:
 # Try to import - handle both local and Streamlit Cloud paths
 try:
     from graph_builder.extractor import extract as rule_based_extract
-    from graph_builder.graph_builder import build_graph
+    from graph_builder.graph_builder import build_graph, normalize_llm_graph
     from graph_builder.mermaid import render_mermaid
 except ImportError:
     # If running from graph_builder directory directly
     from extractor import extract as rule_based_extract
-    from graph_builder import build_graph
+    from graph_builder import build_graph, normalize_llm_graph
     from mermaid import render_mermaid
+
+
+# ============================================================================
+# MERMAID RENDERING UTILITY
+# ============================================================================
+
+def render_mermaid_html(mermaid_code: str) -> None:
+    """
+    Render Mermaid diagram visually using st.components.html.
+    
+    Args:
+        mermaid_code: Mermaid diagram code to render
+    """
+    import streamlit.components.v1 as components
+    
+    # HTML template with Mermaid CDN and rendering
+    html_template = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+        <script>
+            mermaid.initialize({{ startOnLoad: true }});
+        </script>
+        <style>
+            body {{
+                margin: 0;
+                padding: 20px;
+                background-color: white;
+                overflow: auto;
+            }}
+            .mermaid {{
+                display: flex;
+                justify-content: center;
+                align-items: center;
+            }}
+        </style>
+    </head>
+    <body>
+        <div class="mermaid">
+{mermaid_code}
+        </div>
+    </body>
+    </html>
+    """
+    
+    # Render with fixed height and scrolling enabled
+    components.html(html_template, height=600, scrolling=True)
 
 
 # ============================================================================
@@ -236,6 +284,10 @@ def generate_graph(chunks: List[Dict[str, str]], mode: str) -> Tuple[Dict, str, 
     # Step 2: Build normalized graph
     graph = build_graph(extractions, document_name="streamlit_input.txt")
     
+    # Step 2.5: Apply LLM-specific normalization if using LLM mode
+    if mode == "LLM-based Extraction":
+        graph = normalize_llm_graph(graph)
+    
     # Step 3: Render Mermaid
     mermaid_text = render_mermaid(graph)
     
@@ -396,8 +448,6 @@ def main():
             # Display Mermaid code
             st.code(st.session_state.mermaid_text, language="mermaid")
             
-            st.info("💡 Copy the code above and paste into [Mermaid Live Editor](https://mermaid.live) to visualize")
-            
             # Download button
             st.download_button(
                 label="📥 Download graph.mmd",
@@ -405,6 +455,18 @@ def main():
                 file_name="graph.mmd",
                 mime="text/plain"
             )
+            
+            st.divider()
+            
+            # Render visual diagram
+            st.subheader("Visual Rendering")
+            st.caption("Interactive Mermaid diagram rendered below")
+            
+            try:
+                render_mermaid_html(st.session_state.mermaid_text)
+            except Exception as e:
+                st.warning(f"⚠️ Could not render diagram: {e}")
+                st.info("💡 Copy the code above and paste into [Mermaid Live Editor](https://mermaid.live) to visualize")
         
         # Tab 3: Stats
         with tab3:

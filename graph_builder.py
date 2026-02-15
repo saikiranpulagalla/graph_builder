@@ -8,6 +8,209 @@ from .utils import (
 import re
 
 
+def normalize_llm_graph(graph: Graph) -> Graph:
+    """
+    Apply LLM-specific normalization fixes.
+    
+    1. Service name deduplication (merge similar service names)
+    2. Partner vs Company normalization (reclassify based on relations)
+    3. Event-first enforcement (remove duplicate direct relationships)
+    
+    This runs AFTER LLM extraction and BEFORE rendering.
+    """
+    nodes = list(graph.nodes)
+    edges = list(graph.edges)
+    
+    # ── FIX 1: SERVICE NAME DEDUPLICATION ──────────────────────────────
+    # Merge similar Service nodes (e.g., "monitoring service" vs "real-time monitoring service")
+    service_nodes = [n for n in nodes if n.type == "Service"]
+    service_map = {}  # old_id -> new_id
+    merged_services = []
+    processed_services = set()
+    
+    for i, service in enumerate(service_nodes):
+        if service.id in processed_services:
+            continue
+        
+        # Find similar services
+        similar = [service]
+        for j, other in enumerate(service_nodes[i+1:], start=i+1):
+            if other.id in processed_services:
+                continue
+            if is_alias(service.label, other.label):
+                similar.append(other)
+                processed_services.add(other.id)
+        
+        # Merge if multiple similar services found
+        if len(similar) > 1:
+            # Choose most descriptive label
+            best_label = choose_best_label([s.label for s in similar])
+            
+            # Merge sources
+            all_sources = []
+            for s in similar:
+                all_sources.extend(s.sources)
+            
+            # Deduplicate sources
+            unique_sources = []
+            seen = set()
+            for src in all_sources:
+                key = (src.get("chunk_id"), src.get("page"))
+                if key not in seen:
+                    unique_sources.append(src)
+                    seen.add(key)
+            
+            # Create merged service
+            merged = Node(
+                id=generate_id(best_label, "Service"),
+                type="Service",
+                label=best_label,
+                attributes=similar[0].attributes.copy(),
+                sources=unique_sources
+            )
+            
+            # Map all old IDs to new ID
+            for s in similar:
+                service_map[s.id] = merged.id
+            
+            merged_services.append(merged)
+            processed_services.add(service.id)
+        else:
+            merged_services.append(service)
+            service_map[service.id] = service.id
+            processed_services.add(service.id)
+    
+    # Update nodes list with merged services
+    non_service_nodes = [n for n in nodes if n.type != "Service"]
+    nodes = non_service_nodes + merged_services
+    
+    # Update edges to point to merged services
+    updated_edges = []
+    for edge in edges:
+        new_from = service_map.get(edge.from_id, edge.from_id)
+        new_to = service_map.get(edge.to_id, edge.to_id)
+        
+        # Skip self-loops
+        if new_from == new_to:
+            continue
+        
+        updated_edges.append(Edge(
+            from_id=new_from,
+            to_id=new_to,
+            relation=edge.relation,
+            sources=edge.sources
+        ))
+    
+    edges = updated_edges
+    
+    # ── FIX 2: PARTNER VS COMPANY NORMALIZATION ────────────────────────
+    # Reclassify entities that only participate in partnered_with relations as Partner
+    
+    # Build relation map: entity_id -> set of relation types
+    entity_relations = {}
+    for edge in edges:
+        if edge.from_id not in entity_relations:
+            entity_relations[edge.from_id] = set()
+        entity_relations[edge.from_id].add(edge.relation)
+    
+    # Reclassify Company nodes that only have partnered_with relations
+    reclassified_nodes = []
+    node_type_map = {}  # old_id -> new_id (if type changed)
+    
+    for node in nodes:
+        if node.type == "Company":
+            relations = entity_relations.get(node.id, set())
+            # Remove non-business relations
+            business_relations = relations - {"described_in", "has_event"}
+            
+            # If only partnered_with relation exists, reclassify as Partner
+            if business_relations == {"partnered_with"}:
+                new_node = Node(
+                    id=generate_id(node.label, "Partner"),
+                    type="Partner",
+                    label=node.label,
+                    attributes=node.attributes.copy(),
+                    sources=node.sources.copy()
+                )
+                reclassified_nodes.append(new_node)
+                node_type_map[node.id] = new_node.id
+            else:
+                reclassified_nodes.append(node)
+                node_type_map[node.id] = node.id
+        else:
+            reclassified_nodes.append(node)
+            if node.id not in node_type_map:
+                node_type_map[node.id] = node.id
+    
+    nodes = reclassified_nodes
+    
+    # Update edges with reclassified node IDs
+    updated_edges = []
+    for edge in edges:
+        new_from = node_type_map.get(edge.from_id, edge.from_id)
+        new_to = node_type_map.get(edge.to_id, edge.to_id)
+        
+        # Skip if nodes don't exist
+        if new_from not in node_type_map.values() or new_to not in node_type_map.values():
+            continue
+        
+        # Skip self-loops
+        if new_from == new_to:
+            continue
+        
+        updated_edges.append(Edge(
+            from_id=new_from,
+            to_id=new_to,
+            relation=edge.relation,
+            sources=edge.sources
+        ))
+    
+    edges = updated_edges
+    
+    # ── FIX 3: EVENT-FIRST ENFORCEMENT ─────────────────────────────────
+    # Remove duplicate direct relationships when Event exists
+    
+    event_nodes = {n.id for n in nodes if n.type == "Event"}
+    
+    # Find event-mediated relationships
+    event_mediated = set()
+    for edge in edges:
+        if edge.from_id in event_nodes and edge.relation in {"launched", "acquired"}:
+            # This is Event -> launched/acquired -> Target
+            # Find Company -> has_event -> Event
+            for e2 in edges:
+                if e2.to_id == edge.from_id and e2.relation == "has_event":
+                    # Found: Company -> has_event -> Event -> launched/acquired -> Target
+                    # Mark direct Company -> launched/acquired -> Target as redundant
+                    event_mediated.add((e2.from_id, edge.to_id, edge.relation))
+    
+    # Remove redundant direct edges
+    final_edges = []
+    for edge in edges:
+        if (edge.from_id, edge.to_id, edge.relation) in event_mediated:
+            continue  # Skip redundant edge
+        final_edges.append(edge)
+    
+    # ── DEDUPLICATE EDGES ──────────────────────────────────────────────
+    edge_dict = {}
+    for edge in final_edges:
+        key = (edge.from_id, edge.to_id, edge.relation)
+        if key not in edge_dict:
+            edge_dict[key] = edge
+        else:
+            # Merge sources
+            existing = edge_dict[key]
+            for src in edge.sources:
+                if src not in existing.sources:
+                    existing.sources.append(src)
+    
+    # ── SORT FOR DETERMINISTIC OUTPUT ──────────────────────────────────
+    sorted_nodes = sorted(nodes, key=lambda n: (n.type, n.label, n.id))
+    sorted_edges = sorted(edge_dict.values(), key=lambda e: (e.from_id, e.relation, e.to_id))
+    
+    return Graph(nodes=sorted_nodes, edges=sorted_edges)
+
+
 def normalize_graph(graph: Graph) -> Graph:
     """
     Normalize graph to ensure correctness and consistency.
