@@ -1,8 +1,160 @@
 from typing import List, Tuple, Dict, Any
 from collections import defaultdict
 from .schema import Node, Edge, Graph
-from .utils import generate_id, CONTROLLED_RELATIONS, normalize_name, normalize_entity_label
+from .utils import (
+    generate_id, CONTROLLED_RELATIONS, normalize_name, normalize_entity_label,
+    normalize_for_comparison, is_alias, is_invalid_entity_name, choose_best_label
+)
 import re
+
+
+def normalize_graph(graph: Graph) -> Graph:
+    """
+    Normalize graph to ensure correctness and consistency.
+    
+    1. Remove invalid entities (verbs, fragments)
+    2. Merge aliases (e.g., "Nimbus" + "Nimbus Solutions")
+    3. Enforce event-first modeling (remove redundant direct edges)
+    4. Remove unsupported relations
+    5. Deduplicate semantically equivalent services
+    6. Sort for deterministic output
+    """
+    # Step 1: Filter out invalid entities
+    valid_nodes = []
+    for node in graph.nodes:
+        if node.type == "Source":
+            valid_nodes.append(node)
+            continue
+        
+        if is_invalid_entity_name(node.label):
+            continue  # Skip invalid entities
+        
+        valid_nodes.append(node)
+    
+    # Step 2: Merge aliases
+    merged_nodes = []
+    node_map = {}  # old_id -> new_id
+    processed = set()
+    
+    for i, node in enumerate(valid_nodes):
+        if node.id in processed:
+            continue
+        
+        # Find all aliases of this node
+        aliases = [node]
+        for j, other in enumerate(valid_nodes[i+1:], start=i+1):
+            if other.id in processed:
+                continue
+            if other.type == node.type and is_alias(node.label, other.label):
+                aliases.append(other)
+                processed.add(other.id)
+        
+        # Merge aliases into one node
+        if len(aliases) > 1:
+            # Choose best label
+            all_labels = [n.label for n in aliases]
+            best_label = choose_best_label(all_labels)
+            
+            # Merge sources
+            all_sources = []
+            for alias in aliases:
+                all_sources.extend(alias.sources)
+            
+            # Remove duplicate sources
+            unique_sources = []
+            seen_sources = set()
+            for src in all_sources:
+                src_key = (src.get("chunk_id"), src.get("page"))
+                if src_key not in seen_sources:
+                    unique_sources.append(src)
+                    seen_sources.add(src_key)
+            
+            # Create merged node
+            merged_node = Node(
+                id=generate_id(best_label, node.type),
+                type=node.type,
+                label=best_label,
+                attributes=node.attributes.copy(),
+                sources=unique_sources
+            )
+            
+            # Map all old IDs to new ID
+            for alias in aliases:
+                node_map[alias.id] = merged_node.id
+            
+            merged_nodes.append(merged_node)
+            processed.add(node.id)
+        else:
+            merged_nodes.append(node)
+            node_map[node.id] = node.id
+            processed.add(node.id)
+    
+    # Step 3: Update edges with new node IDs
+    updated_edges = []
+    for edge in graph.edges:
+        new_from = node_map.get(edge.from_id, edge.from_id)
+        new_to = node_map.get(edge.to_id, edge.to_id)
+        
+        # Skip if nodes were removed
+        if new_from not in node_map.values() or new_to not in node_map.values():
+            continue
+        
+        # Skip self-loops
+        if new_from == new_to:
+            continue
+        
+        # Filter out unsupported relations
+        if edge.relation not in CONTROLLED_RELATIONS:
+            continue
+        
+        updated_edges.append(Edge(
+            from_id=new_from,
+            to_id=new_to,
+            relation=edge.relation,
+            sources=edge.sources
+        ))
+    
+    # Step 4: Enforce event-first modeling
+    # Find all events
+    event_nodes = {n.id for n in merged_nodes if n.type == "Event"}
+    
+    # Find event-mediated relationships
+    event_mediated = set()
+    for edge in updated_edges:
+        if edge.from_id in event_nodes and edge.relation in {"launched", "acquired"}:
+            # This is Event -> launched/acquired -> Target
+            # Find Company -> has_event -> Event
+            for e2 in updated_edges:
+                if e2.to_id == edge.from_id and e2.relation == "has_event":
+                    # Found: Company -> has_event -> Event -> launched/acquired -> Target
+                    # Mark the direct Company -> launched/acquired -> Target as redundant
+                    event_mediated.add((e2.from_id, edge.to_id, edge.relation))
+    
+    # Remove redundant direct edges
+    final_edges = []
+    for edge in updated_edges:
+        if (edge.from_id, edge.to_id, edge.relation) in event_mediated:
+            continue  # Skip redundant edge
+        final_edges.append(edge)
+    
+    # Step 5: Deduplicate edges
+    edge_dict = {}
+    for edge in final_edges:
+        key = (edge.from_id, edge.to_id, edge.relation)
+        if key not in edge_dict:
+            edge_dict[key] = edge
+        else:
+            # Merge sources
+            existing = edge_dict[key]
+            for src in edge.sources:
+                if src not in existing.sources:
+                    existing.sources.append(src)
+    
+    # Step 6: Sort for deterministic output
+    sorted_nodes = sorted(merged_nodes, key=lambda n: (n.type, n.label, n.id))
+    sorted_edges = sorted(edge_dict.values(), key=lambda e: (e.from_id, e.relation, e.to_id))
+    
+    return Graph(nodes=sorted_nodes, edges=sorted_edges)
 
 
 def build_graph(
@@ -218,7 +370,11 @@ def build_graph(
                     elif src not in edge_dict[key].sources:
                         edge_dict[key].sources.append(src)
 
-    return Graph(
+    raw_graph = Graph(
         nodes=list(label_to_node.values()),
         edges=list(edge_dict.values()),
     )
+    
+    # Apply normalization to ensure correctness and consistency
+    return normalize_graph(raw_graph)
+
